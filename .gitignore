@@ -1,0 +1,61 @@
+# ── 构建目录 ────────────────────────────────────────────────
+# CMake 是 out-of-source：构建产物全在仓库外，源码目录里不该出现编译残留。
+# 不带前导斜杠 —— 任意层级都匹配（third_party/googletest/build/ 也算）。
+build/
+build-*/
+cmake-build-*/
+
+# ── 编译产物 ────────────────────────────────────────────────
+*.o
+*.obj
+*.lo
+*.a
+*.lib
+*.so
+*.so.*
+*.dylib
+*.dll
+*.exe
+*.out
+*.d
+
+# ── CMake / CTest 生成物 ────────────────────────────────────
+# 万一有人在源码目录里跑了 in-source 构建，这堆东西会散在仓库根目录。
+/CMakeCache.txt
+/CMakeFiles/
+/cmake_install.cmake
+/CTestTestfile.cmake
+/install_manifest.txt
+/Makefile
+*.ninja
+compile_commands.json
+
+# ── 覆盖率 / profile ────────────────────────────────────────
+*.gcda
+*.gcno
+*.gcov
+*.profraw
+*.profdata
+
+# ── 崩溃转储（在仓库根跑测试崩了会吐一个 core 出来）──────────
+/core
+/core.*
+
+# ── 编辑器 / IDE ────────────────────────────────────────────
+.vscode/
+.idea/
+.cache/
+*.swp
+*.swo
+*~
+*.user
+
+# ── 操作系统垃圾 ────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── 注意：models/ 不忽略 ────────────────────────────────────
+# models/tiny/ 那几个文件（model.json / model.bin / model.gguf / test.gguf /
+# vocab.json）名字像产物，但 dqm 里**没有生成它们的脚本**，删了就没了。
+# 测试要靠它们（loader 落地后 ForwardBatch 的端到端测试会直接加载）。
