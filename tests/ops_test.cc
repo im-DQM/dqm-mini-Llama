@@ -238,6 +238,34 @@ TEST(Rope, NeoXMatchesSplitHalfPairs) {
   }
 }
 
+// 位置必须改变旋转结果：pos=0 旋转角为 0（恒等），pos>0 才真正旋转。
+TEST(Rope, PositionChangesRotation) {
+  Tensor base({1, 4}, 0.0f);
+  base[0] = 1.0f; base[1] = 2.0f; base[2] = 3.0f; base[3] = 4.0f;
+
+  Tensor q0 = base;
+  Tensor k0 = base;
+  Tensor q1 = base;
+  Tensor k1 = base;
+
+  Rope(q0, k0, 0, 10000.0f);
+  Rope(q1, k1, 1, 10000.0f);
+
+  // pos=0：旋转角恒为 0，q/k 原地不动
+  for (int i = 0; i < 4; ++i) {
+    EXPECT_NEAR(q0[i], base[i], 1e-6f);
+  }
+
+  // pos 不同 -> 旋转角不同 -> 结果不同
+  bool moved = false;
+  for (int i = 0; i < 4; ++i) {
+    if (std::fabs(q1[i] - q0[i]) > 1e-6f) {
+      moved = true;
+    }
+  }
+  EXPECT_TRUE(moved);
+}
+
 TEST(Rope, RejectsNon2D) {
   Tensor q({4}, 0.0f);
   Tensor k({2, 4}, 0.0f);

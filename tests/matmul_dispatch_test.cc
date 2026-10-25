@@ -153,25 +153,83 @@ TEST(LinearErrors, RejectsInnerDimensionMismatch) {
 }
 
 // ===========================================================================
-// 默认档 & 未实现档
+// 默认档 & 四档等价性
 // ===========================================================================
 
-TEST(DispatchDefault, DefaultModeIsNaiveThisRound) {
+TEST(DispatchDefault, DefaultModeIsThreadedSimd) {
+  EXPECT_EQ(dqm::DefaultMatmulMode(), MatmulMode::kThreadedSimd);
+}
+
+// 四档 Matmul 结果一致（形状取大一点，覆盖多线程切分；kSimd 会退回多线程）。
+TEST(DispatchModes, MatmulModesAgree) {
+  Tensor a = Filled({6, 5}, 0.1f, 0.03f);
+  Tensor b = Filled({5, 7}, -0.2f, 0.05f);
+  const Tensor ref = MatmulDispatch(a, b, MatmulMode::kNaive);
+  for (MatmulMode m : {MatmulMode::kThreaded, MatmulMode::kSimd,
+                       MatmulMode::kThreadedSimd}) {
+    const Tensor got = MatmulDispatch(a, b, m);
+    ASSERT_EQ(got.shape, ref.shape);
+    for (size_t i = 0; i < got.size(); ++i) {
+      EXPECT_NEAR(got.data[i], ref.data[i], 1e-4f);
+    }
+  }
+}
+
+// 四档 Linear 结果一致（in_features 取奇数，覆盖 SIMD 的标量尾巴）。
+TEST(DispatchModes, LinearModesAgree) {
+  Tensor x = Filled({13}, 0.05f, 0.07f);
+  Tensor w = Filled({9, 13}, -0.1f, 0.02f);
+  const Tensor ref = LinearDispatch(x, w, MatmulMode::kNaive);
+  for (MatmulMode m : {MatmulMode::kThreaded, MatmulMode::kSimd,
+                       MatmulMode::kThreadedSimd}) {
+    const Tensor got = LinearDispatch(x, w, m);
+    ASSERT_EQ(got.shape, ref.shape);
+    for (size_t i = 0; i < got.size(); ++i) {
+      EXPECT_NEAR(got.data[i], ref.data[i], 1e-4f);
+    }
+  }
+}
+
+// ===========================================================================
+// 默认档可设置 & 策略名解析
+// ===========================================================================
+
+// 覆盖默认档后生效，恢复后回到原值（保存/还原，避免影响其它用例）。
+TEST(DispatchDefault, SetDefaultOverridesThenRestores) {
+  const MatmulMode saved = dqm::DefaultMatmulMode();
+  dqm::SetDefaultMatmulMode(MatmulMode::kNaive);
   EXPECT_EQ(dqm::DefaultMatmulMode(), MatmulMode::kNaive);
+  dqm::SetDefaultMatmulMode(saved);
+  EXPECT_EQ(dqm::DefaultMatmulMode(), saved);
 }
 
-TEST(DispatchUnimplemented, MatmulUnimplementedModesThrowLogicError) {
-  Tensor a({2, 2}, 0.0f);
-  Tensor b({2, 2}, 0.0f);
-  EXPECT_THROW(MatmulDispatch(a, b, MatmulMode::kThreaded), std::logic_error);
-  EXPECT_THROW(MatmulDispatch(a, b, MatmulMode::kSimd), std::logic_error);
-  EXPECT_THROW(MatmulDispatch(a, b, MatmulMode::kThreadedSimd), std::logic_error);
+TEST(MatmulModeNames, ParseAcceptsCanonicalNames) {
+  MatmulMode m = MatmulMode::kNaive;
+  EXPECT_TRUE(dqm::ParseMatmulMode("naive", m));
+  EXPECT_EQ(m, MatmulMode::kNaive);
+  EXPECT_TRUE(dqm::ParseMatmulMode("threaded", m));
+  EXPECT_EQ(m, MatmulMode::kThreaded);
+  EXPECT_TRUE(dqm::ParseMatmulMode("simd", m));
+  EXPECT_EQ(m, MatmulMode::kSimd);
+  EXPECT_TRUE(dqm::ParseMatmulMode("threaded-simd", m));
+  EXPECT_EQ(m, MatmulMode::kThreadedSimd);
 }
 
-TEST(DispatchUnimplemented, LinearUnimplementedModesThrowLogicError) {
-  Tensor x({3}, 0.0f);
-  Tensor w({3, 3}, 0.0f);
-  EXPECT_THROW(LinearDispatch(x, w, MatmulMode::kThreaded), std::logic_error);
-  EXPECT_THROW(LinearDispatch(x, w, MatmulMode::kSimd), std::logic_error);
-  EXPECT_THROW(LinearDispatch(x, w, MatmulMode::kThreadedSimd), std::logic_error);
+// 非法名字返回 false，且不改动传入的 mode。
+TEST(MatmulModeNames, ParseRejectsUnknownWithoutChangingValue) {
+  MatmulMode m = MatmulMode::kSimd;
+  EXPECT_FALSE(dqm::ParseMatmulMode("turbo", m));
+  EXPECT_FALSE(dqm::ParseMatmulMode("", m));
+  EXPECT_FALSE(dqm::ParseMatmulMode("Threaded", m));  // 大小写敏感
+  EXPECT_EQ(m, MatmulMode::kSimd);
+}
+
+// MatmulModeName / ParseMatmulMode 互为逆。
+TEST(MatmulModeNames, NameRoundTripsThroughParse) {
+  for (MatmulMode m : {MatmulMode::kNaive, MatmulMode::kThreaded,
+                       MatmulMode::kSimd, MatmulMode::kThreadedSimd}) {
+    MatmulMode back = MatmulMode::kNaive;
+    ASSERT_TRUE(dqm::ParseMatmulMode(dqm::MatmulModeName(m), back));
+    EXPECT_EQ(back, m);
+  }
 }

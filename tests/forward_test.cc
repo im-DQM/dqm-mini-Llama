@@ -165,17 +165,27 @@ TEST(ForwardToken, LaterStepAttendsToWrittenHistory) {
 // 位置相关（RoPE）
 // ===========================================================================
 
-TEST(ForwardToken, SameTokenAtDifferentPositionsDiffers) {
-  MiniLlamaModel model = MakeTinyModel();
-  MiniLlamaContext ctx(&model);
+// RoPE 必须真正参与 forward：改变 rope_theta 会改变输出。
+//
+// 注意必须用「不同 token」的序列。若各位置 token 相同，则每个位置的
+// v = wv·rmsnorm(embed(tok)) 全相等，attention 输出 Σ probs[t]·v_t 坍缩为
+// v·Σprobs = v，与 probs 无关；而 RoPE 只改 q/k（只影响 probs），于是
+// 位置对输出毫无影响 —— 这正是「同一 token 不同位置」测不出 RoPE 的原因。
+TEST(ForwardToken, RopeInfluencesOutput) {
+  auto run = [](float theta, int first, int second) {
+    MiniLlamaModel model = MakeTinyModel();
+    model.config.rope_theta = theta;
+    MiniLlamaContext ctx(&model);
+    ctx.pos = 0;
+    ForwardToken(ctx, model, first);
+    ctx.pos = 1;
+    return ForwardToken(ctx, model, second);
+  };
 
-  ctx.pos = 0;
-  const Tensor at_zero = ForwardToken(ctx, model, 5);
+  const Tensor baseline = run(10000.0f, 5, 7);
+  const Tensor shifted = run(1.0f, 5, 7);
 
-  ctx.pos = 1;
-  const Tensor at_one = ForwardToken(ctx, model, 5);
-
-  EXPECT_FALSE(NearlyEqual(at_zero, at_one));
+  EXPECT_FALSE(NearlyEqual(baseline, shifted));
 }
 
 // ===========================================================================

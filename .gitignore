@@ -59,3 +59,8 @@ desktop.ini
 # models/tiny/ 那几个文件（model.json / model.bin / model.gguf / test.gguf /
 # vocab.json）名字像产物，但 dqm 里**没有生成它们的脚本**，删了就没了。
 # 测试要靠它们（loader 落地后 ForwardBatch 的端到端测试会直接加载）。
+
+# ── 但大模型不进 git ────────────────────────────────────────
+# 531MB 的 chat 模型只留工作区。参考项目用 Git LFS 管它
+# （.gitattributes: models/chat/*.gguf filter=lfs ...）；本机没装 lfs，改用忽略。
+models/chat/*.gguf

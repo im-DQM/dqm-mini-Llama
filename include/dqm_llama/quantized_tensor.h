@@ -28,6 +28,7 @@ struct BlockQ80 {
   uint16_t d;   // FP16 缩放因子
   int8_t qs[kQ80BlockSize];
 };
+static_assert(sizeof(BlockQ80) == 34, "BlockQ80 must be 34 bytes (ggml layout)");
 
 // ---------------------------------------------------------------------------
 // Q4_0 block：每块 32 个元素，打包进 16 字节
@@ -38,6 +39,7 @@ struct BlockQ40 {
   uint16_t d;
   uint8_t qs[kQ40BlockSize / 2];
 };
+static_assert(sizeof(BlockQ40) == 18, "BlockQ40 must be 18 bytes (ggml layout)");
 
 // ---------------------------------------------------------------------------
 // Q4_1 block：比 Q4_0 多一个最小值 m
@@ -49,6 +51,7 @@ struct BlockQ41 {
   uint16_t m;
   uint8_t qs[kQ41BlockSize / 2];
 };
+static_assert(sizeof(BlockQ41) == 20, "BlockQ41 must be 20 bytes (ggml layout)");
 
 // ---------------------------------------------------------------------------
 // QuantizedTensor：带 tag 的容器
