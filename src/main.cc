@@ -348,19 +348,49 @@ void PrintRunUsage(const char* program) {
   std::cout
       << "Usage: " << program << " run <model_dir> [options]\n"
       << "\n"
+      << "Interactive terminal chat. Loads a manifest directory or a .gguf\n"
+      << "model, keeps multi-turn history, reuses cached prefixes and streams\n"
+      << "the reply. Slash commands: /help /stats /params /clear /exit\n"
+      << "\n"
       << "Options:\n"
-      << "  --temperature <float> Sampling temperature (default: 0 = greedy)\n"
-      << "  --top-k <int>         Top-k cutoff (default: 0 = disabled)\n"
-      << "  --seed <uint>         RNG seed (default: 0 = random_device)\n"
-      << "  -n, --n-predict <int> Max tokens per turn (default: 64)\n"
-      << "  --tokenizer <path>    Tokenizer file (default: auto-detect)\n"
-      << "  --request             Show per-request trace info\n"
-      << "  --matmul-mode <name>  Matmul strategy: "
-         "naive|threaded|simd|threaded-simd\n"
-      << "  --threads <int>       Number of threads (0 = auto)\n"
-      << "  --backend cpu|cuda    Execution backend (default: cpu)\n"
-      << "  --device <int>        CUDA device id for --backend cuda (default: 0)\n"
-      << "  -h, --help            Show this help\n";
+      << "  --temperature <float>  Sampling temperature. 0 = greedy\n"
+      << "                         (deterministic); larger values are more\n"
+      << "                         random. (default: 0)\n"
+      << "  --top-k <int>          Keep only the k most probable tokens before\n"
+      << "                         sampling; 0 disables the cutoff.\n"
+      << "                         (default: 0)\n"
+      << "  --seed <uint>          RNG seed. 0 = random_device (not\n"
+      << "                         reproducible); any other value replays the\n"
+      << "                         same samples. (default: 0)\n"
+      << "  -n, --n-predict <int>  Maximum tokens generated per reply; a turn\n"
+      << "                         also ends early when EOS is sampled.\n"
+      << "                         (default: 64)\n"
+      << "  --tokenizer <path>     Tokenizer file/dir to use; by default it is\n"
+      << "                         taken from GGUF metadata or the model dir.\n"
+      << "  --request              Print a per-request trace: prompt_build /\n"
+      << "                         tokenize / prefill / decode / sample timings\n"
+      << "                         plus token counts for every turn.\n"
+      << "  --dequant-f32          Expand quantized linear weights\n"
+      << "                         (Q8_0/Q4_0/Q4_1) to F32 at load. Required\n"
+      << "                         for --matmul-mode to take effect; costs about\n"
+      << "                         4x the memory of Q8_0 weights.\n"
+      << "  --matmul-mode <name>   F32 linear kernel: naive (scalar, one\n"
+      << "                         thread), simd (AVX2, one thread), threaded\n"
+      << "                         (scalar, N threads), threaded-simd (AVX2, N\n"
+      << "                         threads). (default: threaded-simd)\n"
+      << "                         Quantized weights always use the scalar\n"
+      << "                         quantized kernel, so this flag has no effect\n"
+      << "                         on them.\n"
+      << "  --threads <int>        Worker threads for parallel kernels.\n"
+      << "                         0 = auto (hardware_concurrency). Tiny\n"
+      << "                         matrices may stay serial below\n"
+      << "                         threads * 16 elements. (default: 0)\n"
+      << "  --backend cpu|cuda     Execution backend. cuda requires a build\n"
+      << "                         configured with -DDQM_LLAMA_CUDA=ON.\n"
+      << "                         (default: cpu)\n"
+      << "  --device <int>         CUDA device index used by --backend cuda.\n"
+      << "                         (default: 0)\n"
+      << "  -h, --help             Show this help and exit.\n";
 }
 
 // 非交互单次生成的用法（冒烟测试用）。
@@ -368,24 +398,41 @@ void PrintGenerateUsage(const char* program) {
   std::cout
       << "Usage: " << program << " generate [model_dir] [options]\n"
       << "\n"
+      << "Non-interactive single generation: encode one prompt, generate, print\n"
+      << "the tokens/text, then exit. Unless --raw-prompt is given, the prompt\n"
+      << "is wrapped in the model's chat template.\n"
+      << "\n"
       << "Options:\n"
-      << "  --model <path|dir>    Model weights (.bin/.gguf) or directory\n"
-      << "  --config <path>       Model config JSON (overrides <dir>/model.json)\n"
-      << "  --raw-prompt          Encode the prompt directly (skip chat template)\n"
-      << "  -p, --prompt <str>    Input prompt text (default: \"hello\")\n"
-      << "  -n, --n-predict <int> Number of tokens to generate (default: 16)\n"
-      << "  --temperature <float> Sampling temperature (default: 0 = greedy)\n"
-      << "  --top-k <int>         Top-k cutoff (default: 0 = disabled)\n"
-      << "  --seed <uint>         RNG seed (default: 0 = random_device)\n"
-      << "  --tokenizer <path>    Tokenizer file (default: auto-detect)\n"
-      << "  --quant q8_0|q4_0     Quantize loaded Linear weights first\n"
-      << "  --dump-logits <dir>   Dump per-step logits to a directory\n"
-      << "  --matmul-mode <name>  Matmul strategy: "
-         "naive|threaded|simd|threaded-simd\n"
-      << "  --threads <int>       Number of threads (0 = auto)\n"
-      << "  --backend cpu|cuda    Execution backend (default: cpu)\n"
-      << "  --device <int>        CUDA device id for --backend cuda (default: 0)\n"
-      << "  -h, --help            Show this help\n";
+      << "  --model <path|dir>     Weights to load: manifest .bin, .gguf, or a\n"
+      << "                         model directory. Overrides model_dir.\n"
+      << "                         (default: models/tiny/model.bin)\n"
+      << "  --config <path>        Manifest JSON config; overrides\n"
+      << "                         <dir>/model.json.\n"
+      << "  --raw-prompt           Encode the prompt text as-is, skipping the\n"
+      << "                         chat template (used for Python golden\n"
+      << "                         comparison).\n"
+      << "  -p, --prompt <str>     Input prompt text. (default: \"hello\")\n"
+      << "  -n, --n-predict <int>  Number of tokens to generate; a run also ends\n"
+      << "                         early on EOS. (default: 16)\n"
+      << "  --temperature <float>  Sampling temperature. 0 = greedy\n"
+      << "                         (deterministic). (default: 0)\n"
+      << "  --top-k <int>          Keep only the k most probable tokens; 0\n"
+      << "                         disables the cutoff. (default: 0)\n"
+      << "  --seed <uint>          RNG seed; 0 = random_device. (default: 0)\n"
+      << "  --tokenizer <path>     Tokenizer file/dir; default auto-detect.\n"
+      << "  --quant q8_0|q4_0      Quantize the loaded F32 linear weights before\n"
+      << "                         inference (memory/speed experiment).\n"
+      << "  --dump-logits <dir>    Write per-step logits and\n"
+      << "                         generation_tokens.txt for numerical alignment.\n"
+      << "  --matmul-mode <name>   F32 linear kernel: naive | simd | threaded |\n"
+      << "                         threaded-simd. Only affects F32 weights.\n"
+      << "                         (default: threaded-simd)\n"
+      << "  --threads <int>        Worker threads for parallel kernels;\n"
+      << "                         0 = auto. (default: 0)\n"
+      << "  --backend cpu|cuda     Execution backend; cuda needs a\n"
+      << "                         -DDQM_LLAMA_CUDA=ON build. (default: cpu)\n"
+      << "  --device <int>         CUDA device index. (default: 0)\n"
+      << "  -h, --help             Show this help and exit.\n";
 }
 
 // bench 子命令的用法（跑 prefill + decode，打吞吐与内存统计）。
@@ -393,19 +440,30 @@ void PrintBenchUsage(const char* program) {
   std::cout
       << "Usage: " << program << " bench [model_dir] [options]\n"
       << "\n"
+      << "Benchmark one prefill + decode pass and print latency, tokens/s and\n"
+      << "memory statistics. The prompt is encoded directly (chat template is\n"
+      << "skipped). Use --matmul-mode / --threads / --quant to compare setups.\n"
+      << "\n"
       << "Options:\n"
-      << "  -p, --prompt <str>    Input prompt text (default: \"hello\")\n"
-      << "  -n, --n-predict <int> Number of tokens to generate (default: 64)\n"
-      << "  --seed <uint>         RNG seed (default: 0 = random_device)\n"
-      << "  --tokenizer <path>    Tokenizer file (default: auto-detect)\n"
-      << "  --quant q8_0|q4_0     Quantize loaded Linear weights first\n"
-      << "  --verbose             Print debug dumps after each step\n"
-      << "  --matmul-mode <name>  Matmul strategy: "
-         "naive|threaded|simd|threaded-simd\n"
-      << "  --threads <int>       Number of threads (0 = auto)\n"
-      << "  --backend cpu|cuda    Execution backend (default: cpu)\n"
-      << "  --device <int>        CUDA device id for --backend cuda (default: 0)\n"
-      << "  -h, --help            Show this help\n";
+      << "  -p, --prompt <str>     Prompt to prefill. (default: \"hello\")\n"
+      << "  -n, --n-predict <int>  Number of decode steps; clamped to the\n"
+      << "                         remaining context window. (default: 64)\n"
+      << "  --seed <uint>          Sampling seed for reproducible runs;\n"
+      << "                         0 = random_device. (default: 0)\n"
+      << "  --tokenizer <path>     Tokenizer file/dir; default auto-detect.\n"
+      << "  --quant q8_0|q4_0      Quantize linear weights first and report the\n"
+      << "                         quantization error against the baseline.\n"
+      << "  --verbose              Dump tensor shapes, logits top-k and KV-cache\n"
+      << "                         position after prefill and every decode step.\n"
+      << "  --matmul-mode <name>   F32 linear kernel: naive | simd | threaded |\n"
+      << "                         threaded-simd. Only affects F32 weights.\n"
+      << "                         (default: threaded-simd)\n"
+      << "  --threads <int>        Worker threads for parallel kernels;\n"
+      << "                         0 = auto. (default: 0)\n"
+      << "  --backend cpu|cuda     Execution backend; cuda needs a\n"
+      << "                         -DDQM_LLAMA_CUDA=ON build. (default: cpu)\n"
+      << "  --device <int>         CUDA device index. (default: 0)\n"
+      << "  -h, --help             Show this help and exit.\n";
 }
 
 // ── 模型装配 ────────────────────────────────────────────────────────────
@@ -583,6 +641,7 @@ static int RunChat(int argc, char** argv) {
   int max_response_tokens = 64;
   std::string tokenizer_path;
   bool show_request = false;
+  bool dequant_f32 = false;
   int n_threads = 0;
   MatmulMode matmul_mode = DefaultMatmulMode();
   BackendConfig backend_config;
@@ -639,6 +698,8 @@ static int RunChat(int argc, char** argv) {
       }
     } else if (std::strcmp(argv[i], "--request") == 0) {
       show_request = true;
+    } else if (std::strcmp(argv[i], "--dequant-f32") == 0) {
+      dequant_f32 = true;
     } else if (std::strcmp(argv[i], "-h") == 0 ||
                std::strcmp(argv[i], "--help") == 0) {
       PrintRunUsage(argv[0]);
@@ -662,6 +723,9 @@ static int RunChat(int argc, char** argv) {
   if (!lm.model.loaded) {
     std::cerr << "Failed to load model: " << lm.model.load_error << "\n";
     return 1;
+  }
+  if (dequant_f32) {
+    DequantizeModelToF32(lm.model);
   }
   if (!PrepareCudaWeightsOrPrint(lm.model, backend_config)) {
     return 1;
@@ -700,6 +764,9 @@ static int RunChat(int argc, char** argv) {
   term.PrintMessage("Type /help for commands, /exit to quit.\n");  
   term.PrintMessage("threads: " + std::to_string(GetThreadCount()));
   term.PrintMessage("matmul mode: " + MatmulModeName(DefaultMatmulMode()));
+  if (dequant_f32) {
+    term.PrintMessage("weights: f32 (dequantized at load)");
+  }
   term.PrintMessage("backend: " + BackendKindName(backend_config.kind));
   term.PrintMessage(BackendExecutionNote(backend_config));
   if (backend_config.kind == BackendKind::kCuda) {
@@ -1517,12 +1584,17 @@ static int RunCudaInfo() {
 // ── inspect：看 manifest / 模型配置 ─────────────────────────────────────
 static void PrintInspectUsage(const char* prog) {
   std::cout << "Usage: " << prog << " inspect <model-path|dir> [options]\n"
+            << "\n"
+            << "Load a manifest/GGUF model and print its configuration\n"
+            << "(vocab, dim, layers, heads, context length) and tensor metadata\n"
+            << "(name, shape, dtype, byte size). Does not run inference.\n"
+            << "\n"
             << "Options:\n"
             << "  --backend cpu|cuda   Execution backend (default: cpu; cuda "
                "requires -DDQM_LLAMA_CUDA=ON)\n"
             << "  --device <n>         CUDA device id for --backend cuda "
                "(default: 0)\n"
-            << "  -h, --help           Show this help\n";
+            << "  -h, --help           Show this help and exit.\n";
 }
 
 static MiniLlamaModel LoadModelForInspect(const std::string& path) {
@@ -1643,13 +1715,26 @@ namespace {
 
 void PrintTopLevelUsage(const char* program, std::ostream& out) {
   out << "Usage: " << program << " <command> [options]\n"
+      << "\n"
+      << "dqm-mini-llama: a small, readable LLaMA/Qwen2 inference engine.\n"
+      << "Supports manifest (.bin + .json) and GGUF models, CPU and CUDA\n"
+      << "backends, Q8_0/Q4_0/Q4_1 weights, and interactive chat.\n"
+      << "\n"
       << "Commands:\n"
-      << "  run <model_dir>               Interactive chat\n"
-      << "  generate [model_dir] -p <s>   One-shot generation (smoke)\n"
-      << "  bench [model_dir]             Benchmark prefill + decode\n"
-      << "  inspect <model-path|dir>      Show model config / tensors\n"
-      << "  inspect-gguf <path>           Show GGUF metadata / tensors\n"
-      << "  --cuda-info                   Show CUDA device information\n"
+      << "  run <model_dir>               Interactive chat with history and\n"
+      << "                                prefix-cache reuse; prints per-turn\n"
+      << "                                stats with --request.\n"
+      << "  generate [model_dir] -p <s>   One-shot generation (smoke test):\n"
+      << "                                prefill + decode once, print tokens\n"
+      << "                                and text, then exit.\n"
+      << "  bench [model_dir]             Benchmark prefill/decode latency,\n"
+      << "                                tokens/s and memory usage.\n"
+      << "  inspect <model-path|dir>      Show model config and tensor\n"
+      << "                                metadata without running inference.\n"
+      << "  inspect-gguf <path>           Show raw GGUF metadata and the tensor\n"
+      << "                                list.\n"
+      << "  --cuda-info                   Show CUDA devices and runtime info\n"
+      << "                                (requires a CUDA build).\n"
       << "\nRun '<command> --help' for command-specific options.\n";
 }
 

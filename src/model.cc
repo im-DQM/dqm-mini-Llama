@@ -403,6 +403,34 @@ void QuantizeQtToQ40(QuantizedTensor& qt) {
   qt.q4_1_data.shrink_to_fit();
 }
 
+void DequantizeQtToF32(QuantizedTensor& qt) {
+  if (qt.type == QuantType::kF32) {
+    return;
+  }
+  Tensor t;
+  switch (qt.type) {
+    case QuantType::kQ80:
+      t = DequantizeFromQ80(qt.q8_0_data, qt.shape);
+      break;
+    case QuantType::kQ40:
+      t = DequantizeFromQ40(qt.q4_0_data, qt.shape);
+      break;
+    case QuantType::kQ41:
+      t = DequantizeFromQ41(qt.q4_1_data, qt.shape);
+      break;
+    case QuantType::kF32:
+      return;
+  }
+  qt.f32_data = std::move(t.data);
+  qt.type = QuantType::kF32;
+  qt.q8_0_data.clear();
+  qt.q8_0_data.shrink_to_fit();
+  qt.q4_0_data.clear();
+  qt.q4_0_data.shrink_to_fit();
+  qt.q4_1_data.clear();
+  qt.q4_1_data.shrink_to_fit();
+}
+
 }  // namespace
 
 void QuantizeModelToQ80(MiniLlamaModel& model) {
@@ -428,6 +456,19 @@ void QuantizeModelToQ40(MiniLlamaModel& model) {
     QuantizeQtToQ40(lw.w_gate);
     QuantizeQtToQ40(lw.w_up);
     QuantizeQtToQ40(lw.w_down);
+  }
+}
+
+void DequantizeModelToF32(MiniLlamaModel& model) {
+  DequantizeQtToF32(model.lm_head);
+  for (auto& lw : model.layers) {
+    DequantizeQtToF32(lw.wq);
+    DequantizeQtToF32(lw.wk);
+    DequantizeQtToF32(lw.wv);
+    DequantizeQtToF32(lw.wo);
+    DequantizeQtToF32(lw.w_gate);
+    DequantizeQtToF32(lw.w_up);
+    DequantizeQtToF32(lw.w_down);
   }
 }
 

@@ -163,6 +163,79 @@ TEST(Quant, LinearQ80DimensionMismatch) {
   EXPECT_THROW(dqm::LinearQ80(x, {r}, {1, 32}), std::runtime_error);
 }
 
+// in_features 不是 32 的倍数：最后一个 block 只有 10 个有效元素，
+// 向量路径吃 8 个、标量尾巴吃 2 个。
+TEST(Quant, LinearQ80PartialBlockTail) {
+  constexpr int kIn = 42;
+  constexpr int kOut = 2;
+  constexpr int kBlocksPerRow = 2;
+  std::vector<dqm::BlockQ80> blocks(kOut * kBlocksPerRow);
+  for (size_t b = 0; b < blocks.size(); ++b) {
+    blocks[b].d = kFp16One;  // d = 1，期望值直接是 q * x
+    for (int i = 0; i < dqm::kQ80BlockSize; ++i) {
+      blocks[b].qs[i] =
+          static_cast<int8_t>((i + 7 * static_cast<int>(b)) % 17 - 8);
+    }
+  }
+  dqm::Tensor x({kIn}, 0.0f);
+  for (int k = 0; k < kIn; ++k) {
+    x.data[static_cast<size_t>(k)] = 0.25f * static_cast<float>(k % 5);
+  }
+
+  dqm::Tensor y = dqm::LinearQ80(x, blocks, {kOut, kIn});
+
+  ASSERT_EQ(y.shape, (std::vector<int>{kOut}));
+  for (int j = 0; j < kOut; ++j) {
+    float expected = 0.0f;
+    for (int k = 0; k < kIn; ++k) {
+      const dqm::BlockQ80& block = blocks[static_cast<size_t>(j * kBlocksPerRow + k / 32)];
+      expected += static_cast<float>(block.qs[k % 32]) *
+                  x.data[static_cast<size_t>(k)];
+    }
+    EXPECT_NEAR(y.data[static_cast<size_t>(j)], expected, 1e-4f);
+  }
+}
+
+// 2D 输入（prefill 路径）：每个 row 独立计算，输出秩跟随输入。
+TEST(Quant, LinearQ80BatchInput) {
+  constexpr int kIn = 40;
+  constexpr int kOut = 3;
+  constexpr int kRows = 3;
+  constexpr int kBlocksPerRow = 2;
+  std::vector<dqm::BlockQ80> blocks(kOut * kBlocksPerRow);
+  for (size_t b = 0; b < blocks.size(); ++b) {
+    blocks[b].d = kFp16One;
+    for (int i = 0; i < dqm::kQ80BlockSize; ++i) {
+      blocks[b].qs[i] = static_cast<int8_t>(static_cast<int>(b) - 4 + i % 9);
+    }
+  }
+  dqm::Tensor x({kRows, kIn}, 0.0f);
+  for (int r = 0; r < kRows; ++r) {
+    for (int k = 0; k < kIn; ++k) {
+      x.data[static_cast<size_t>(r) * kIn + static_cast<size_t>(k)] =
+          0.1f * static_cast<float>(r + k % 3);
+    }
+  }
+
+  dqm::Tensor y = dqm::LinearQ80(x, blocks, {kOut, kIn});
+
+  ASSERT_EQ(y.shape, (std::vector<int>{kRows, kOut}));
+  for (int r = 0; r < kRows; ++r) {
+    for (int j = 0; j < kOut; ++j) {
+      float expected = 0.0f;
+      for (int k = 0; k < kIn; ++k) {
+        const dqm::BlockQ80& block =
+            blocks[static_cast<size_t>(j * kBlocksPerRow + k / 32)];
+        expected += static_cast<float>(block.qs[k % 32]) *
+                    x.data[static_cast<size_t>(r) * kIn + static_cast<size_t>(k)];
+      }
+      EXPECT_NEAR(
+          y.data[static_cast<size_t>(r) * kOut + static_cast<size_t>(j)],
+          expected, 1e-4f);
+    }
+  }
+}
+
 // ---------------------------------------------------------------------------
 // 量化（写路径）：F32 -> 块。往返误差应 <= 块内 d/2。
 // ---------------------------------------------------------------------------

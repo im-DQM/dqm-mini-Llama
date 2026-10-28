@@ -145,4 +145,7 @@ void QuantizeModelToQ80(MiniLlamaModel& model);
 
 void QuantizeModelToQ40(MiniLlamaModel& model);
 
+// 反向操作：把所有 Linear 权重就地展开成 F32（测量四档 matmul 用）。
+void DequantizeModelToF32(MiniLlamaModel& model);
+
 }  // namespace dqm
