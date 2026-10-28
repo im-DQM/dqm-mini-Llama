@@ -1,93 +1,110 @@
 # dqm-mini-llama
 
+一个用 C++17 从零写的 LLaMA 式推理引擎：自己解析 GGUF、自己实现 BPE 分词与前向计算，CPU 与 CUDA 两套后端可切换，
+能在本地笔记本上直接跑通 Qwen2-0.5B（Q8_0 量化）的对话。
 
+项目目标不是"再造一个 llama.cpp"，而是把推理链路上的每一块自己写一遍：张量、算子、量化、KV cache、
+采样、后端接口、精度校验，都得说得清为什么这么做。
 
-## Getting started
+## 能做什么
 
-To make it easy for you to get started with GitLab, here's a list of recommended next steps.
+- **模型格式**：手写 GGUF 二进制解析（元数据、张量表、对齐），加载 Qwen2 权重并做张量映射；
+- **分词**：自实现 BPE，支持 GGUF 词表与特殊标记，按 Qwen2 的 chat template 拼对话；
+- **推理**：Prefill / Decode 两段执行流，KV cache + RoPE 位置编码，前缀命中只 prefill 新增 token；
+- **量化**：F32、Q8_0、Q4_0 三条权重路径，标量实现为准，SIMD 版本与标量逐位对齐；
+- **并行**：多线程 matmul（线程局部累加）+ AVX2/FMA 向量化，四档 matmul 模式可切换对比；
+- **CUDA 后端**：手写 RMSNorm、SiLU、Elementwise、RoPE、注意力与量化 matmul 核函数，
+  `CudaTensor` 常驻显存，热路径上不再搬激活值；
+- **可插拔后端**：CMake 开关隔离 CPU / CUDA 构建环境，不开 CUDA 也能完整编译与测试；
+- **工程闭环**：GoogleTest 用例 + CTest + ASan 构建选项 + CLI smoke，`scripts/` 下还有 logits 对照与基准脚本。
 
-Already a pro? Just edit this README.md and make it your own. Want to make it easy? [Use the template at the bottom](#editing-this-readme)!
+## 性能（Qwen2-0.5B-Instruct-Q8_0）
 
-## Add your files
+环境：Intel i7-13650HX（14 核 20 线程）、RTX 4060 Laptop、远程 RTX 4090D；4 轮对话共 prompt 863 tokens、
+生成 198 tokens，统计不含模型加载。完整报告见 [`docs/benchmarks/2026-10-28-qwen2-0.5b-benchmark.md`](docs/benchmarks/2026-10-28-qwen2-0.5b-benchmark.md)。
 
-- [ ] [Create](https://docs.gitlab.com/ee/user/project/repository/web_editor.html#create-a-file) or [upload](https://docs.gitlab.com/ee/user/project/repository/web_editor.html#upload-a-file) files
-- [ ] [Add files using the command line](https://docs.gitlab.com/ee/gitlab-basics/add-file.html#add-a-file-using-the-command-line) or push an existing Git repository with the following command:
+| 配置 | tokens/s | 相对 naive |
+|---|---|---|
+| CPU · naive（单线程标量） | 2.58 | 1.00× |
+| CPU · SIMD（单线程 AVX2） | 5.97 | 2.31× |
+| CPU · threaded（20 线程标量） | 6.25 | 2.42× |
+| CPU · threaded-SIMD（20 线程 AVX2） | **6.98** | **2.71×** |
+| CUDA · RTX 4060 Laptop | 38.01 | 5.4×（对最快 CPU） |
+| CUDA · RTX 4090D | **60.95** | **8.7×**（对最快 CPU） |
+
+一句话结论：CPU 上 decode 卡在内存带宽而不是算力，SIMD 与多线程叠加只有 2.7 倍；换到 GPU 才是量级变化。
+
+## 构建
+
+```bash
+# CPU（Release，x86_64 上自动开 -mavx2 -mfma）
+cmake -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j
+
+# 打开 ASan（越界 / 悬垂指针排查）
+cmake -B build-asan -DDQM_LLAMA_ASAN=ON -DCMAKE_BUILD_TYPE=Debug
+cmake --build build-asan -j
+
+# 带 CUDA 后端（需要 CUDA Toolkit，默认按 sm_89 编译，可用 -DCMAKE_CUDA_ARCHITECTURES 覆盖）
+cmake -B build-cuda -DDQM_LLAMA_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=89 -DCMAKE_BUILD_TYPE=Release
+cmake --build build-cuda -j
+```
+
+## 运行
+
+```bash
+# 对话（默认 CPU、threaded-simd）
+./build/dqm-llama --model models/chat/Qwen2-0.5B-Instruct-Q8_0.gguf --prompt "你好，简单介绍一下你自己" --n-predict 64
+
+# 指定后端与并行方式
+./build/dqm-llama --model models/chat/Qwen2-0.5B-Instruct-Q8_0.gguf \
+    --backend cpu --matmul-mode threaded-simd --threads 20 --n-predict 64
+
+# GPU
+./build/dqm-llama --model models/chat/Qwen2-0.5B-Instruct-Q8_0.gguf --backend cuda --n-predict 64
+
+# 看设备信息 / 导出 logits 做精度对照
+./build/dqm-llama --cuda-info
+./build/dqm-llama --model <model> --prompt "hi" --dump-logits
+```
+
+常用参数：`--backend cpu|cuda`、`--matmul-mode naive|simd|threaded|threaded-simd`、`--threads N`、
+`--n-predict N`、`--quant`、`--raw-prompt`（不走 chat template）、`--config`、`--dump-logits`。
+`--help` 有完整说明。
+
+## 测试
+
+```bash
+cd build && ctest --output-on-failure     # 全量：GoogleTest 用例 + CUDA 冒烟（开了 CUDA 才有）
+./build/test-Gtest --gtest_filter='Quant*' # 单跑某组
+```
+
+- `tests/` 下是逐模块的 gtest 用例：GGUF 解析、BPE、前向、KV cache、量化、采样、线程池、后端接口等；
+- 精度以 **CPU logits 为基准**：`scripts/compare_logits.py`、`scripts/reference_forward.py`、
+  `scripts/make_golden.py` 负责生成与比对；
+- `scripts/` 里还有 CLI 冒烟与基准脚本（`test_cli_help.py`、`test_cuda_benchmarks.py` 等）。
+
+## 目录
 
 ```
-cd existing_repo
-git remote add origin http://git.cpptrain.top/dqm/dqm-mini-llama.git
-git branch -M main
-git push -uf origin main
+include/dqm_llama/   公共头：张量、GGUF、量化、KV cache、后端接口、采样、CUDA 封装
+src/                 实现；cuda_*.cc/.cu 为 CUDA 后端
+tests/               GoogleTest 用例
+scripts/             模型/词表导出、logits 对照、基准与冒烟脚本
+docs/benchmarks/     性能测试报告
+third_party/         googletest
+models/              本地模型权重（不入库）
 ```
 
-## Integrate with your tools
+## 已知限制
 
-- [ ] [Set up project integrations](http://git.cpptrain.top/dqm/dqm-mini-llama/-/settings/integrations)
+- **Prefill 没有批量收益**：`ForwardBatch` 目前逐 token 调 `ForwardToken`，602 token 的首轮 prefill 要几秒到几分钟，
+  批量 GEMM 是最值得做的结构性优化；
+- **CUDA 侧偏 kernel 效率**：4090D 只比 4060 快 1.6 倍，说明小 batch 下 kernel 启动与同步占了大头，需要算子融合与批量；
+- **tokenize 偏慢**：每轮约 0.75–1.04 s，值得单独排查；
+- 目前只对齐 Qwen2 系列（chat template、张量命名），其它模型要改映射。
 
-## Collaborate with your team
+## 许可与致谢
 
-- [ ] [Invite team members and collaborators](https://docs.gitlab.com/ee/user/project/members/)
-- [ ] [Create a new merge request](https://docs.gitlab.com/ee/user/project/merge_requests/creating_merge_requests.html)
-- [ ] [Automatically close issues from merge requests](https://docs.gitlab.com/ee/user/project/issues/managing_issues.html#closing-issues-automatically)
-- [ ] [Enable merge request approvals](https://docs.gitlab.com/ee/user/project/merge_requests/approvals/)
-- [ ] [Set auto-merge](https://docs.gitlab.com/ee/user/project/merge_requests/merge_when_pipeline_succeeds.html)
-
-## Test and Deploy
-
-Use the built-in continuous integration in GitLab.
-
-- [ ] [Get started with GitLab CI/CD](https://docs.gitlab.com/ee/ci/quick_start/index.html)
-- [ ] [Analyze your code for known vulnerabilities with Static Application Security Testing (SAST)](https://docs.gitlab.com/ee/user/application_security/sast/)
-- [ ] [Deploy to Kubernetes, Amazon EC2, or Amazon ECS using Auto Deploy](https://docs.gitlab.com/ee/topics/autodevops/requirements.html)
-- [ ] [Use pull-based deployments for improved Kubernetes management](https://docs.gitlab.com/ee/user/clusters/agent/)
-- [ ] [Set up protected environments](https://docs.gitlab.com/ee/ci/environments/protected_environments.html)
-
-***
-
-# Editing this README
-
-When you're ready to make this README your own, just edit this file and use the handy template below (or feel free to structure it however you want - this is just a starting point!). Thanks to [makeareadme.com](https://www.makeareadme.com/) for this template.
-
-## Suggestions for a good README
-
-Every project is different, so consider which of these sections apply to yours. The sections used in the template are suggestions for most open source projects. Also keep in mind that while a README can be too long and detailed, too long is better than too short. If you think your README is too long, consider utilizing another form of documentation rather than cutting out information.
-
-## Name
-Choose a self-explaining name for your project.
-
-## Description
-Let people know what your project can do specifically. Provide context and add a link to any reference visitors might be unfamiliar with. A list of Features or a Background subsection can also be added here. If there are alternatives to your project, this is a good place to list differentiating factors.
-
-## Badges
-On some READMEs, you may see small images that convey metadata, such as whether or not all the tests are passing for the project. You can use Shields to add some to your README. Many services also have instructions for adding a badge.
-
-## Visuals
-Depending on what you are making, it can be a good idea to include screenshots or even a video (you'll frequently see GIFs rather than actual videos). Tools like ttygif can help, but check out Asciinema for a more sophisticated method.
-
-## Installation
-Within a particular ecosystem, there may be a common way of installing things, such as using Yarn, NuGet, or Homebrew. However, consider the possibility that whoever is reading your README is a novice and would like more guidance. Listing specific steps helps remove ambiguity and gets people to using your project as quickly as possible. If it only runs in a specific context like a particular programming language version or operating system or has dependencies that have to be installed manually, also add a Requirements subsection.
-
-## Usage
-Use examples liberally, and show the expected output if you can. It's helpful to have inline the smallest example of usage that you can demonstrate, while providing links to more sophisticated examples if they are too long to reasonably include in the README.
-
-## Support
-Tell people where they can go to for help. It can be any combination of an issue tracker, a chat room, an email address, etc.
-
-## Roadmap
-If you have ideas for releases in the future, it is a good idea to list them in the README.
-
-## Contributing
-State if you are open to contributions and what your requirements are for accepting them.
-
-For people who want to make changes to your project, it's helpful to have some documentation on how to get started. Perhaps there is a script that they should run or some environment variables that they need to set. Make these steps explicit. These instructions could also be useful to your future self.
-
-You can also document commands to lint the code or run tests. These steps help to ensure high code quality and reduce the likelihood that the changes inadvertently break something. Having instructions for running tests is especially helpful if it requires external setup, such as starting a Selenium server for testing in a browser.
-
-## Authors and acknowledgment
-Show your appreciation to those who have contributed to the project.
-
-## License
-For open source projects, say how it is licensed.
-
-## Project status
-If you have run out of energy or time for your project, put a note at the top of the README saying that development has slowed down or stopped completely. Someone may choose to fork your project or volunteer to step in as a maintainer or owner, allowing your project to keep going. You can also make an explicit request for maintainers.
+本人独立实现；设计与思路参考 `llama.cpp`（GGUF 格式、量化方案、算子切分）与相关公开论文。
+模型权重不入库，需自行下载后放在 `models/chat/`。
